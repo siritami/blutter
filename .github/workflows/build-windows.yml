@@ -65,10 +65,12 @@ jobs:
           if ("${{ inputs.no_analysis }}" -eq "true") { $extra += "--no-analysis" }
           if ("${{ inputs.rebuild }}" -eq "true") { $extra += "--rebuild" }
           # blutter.py always tries to run the exe on the input after building.
-          # Feed it a dummy file; verify exe exists instead of trusting exit code.
+          # Feed it a dummy file; expected crash after build. Verify exe exists instead.
           New-Item -ItemType File -Force dummy_libapp.so | Out-Null
           python blutter.py --dart-version $dartver @extra dummy_libapp.so out
-          if (-not (Test-Path $name)) { exit 1 }
+          $global:LASTEXITCODE = 0
+          if (-not (Test-Path $name)) { Write-Error "Build failed: $name not found"; exit 1 }
+          Write-Host "Built $name"
 
       - name: Package release zip
         id: pkg

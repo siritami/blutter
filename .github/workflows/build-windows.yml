@@ -1,0 +1,96 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      no_analysis:
+        description: 'Build with --no-analysis'
+        required: false
+        default: false
+        type: boolean
+      rebuild:
+        description: 'Force rebuild blutter executable even if cached binary exists'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  DART_VERSION: '3.9.2'
+  OS_NAME: 'android'
+  ARCH: 'arm64'
+  SNAPSHOT_HASH: '97ff04a728735e6b6b098bdf983faaba'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout blutter
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Python deps
+        run: pip install pyelftools requests
+
+      - name: Init Windows env (ICU + capstone)
+        run: python scripts\init_env_win.py
+
+      - name: Setup MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compute suffix
+        id: cfg
+        shell: pwsh
+        run: |
+          $suffix = ""
+          if ("${{ inputs.no_analysis }}" -eq "true") { $suffix += "_no-analysis" }
+          "name_suffix=$suffix" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Fetch and build Dart VM library
+        shell: pwsh
+        run: python dartvm_fetch_build.py $env:DART_VERSION $env:OS_NAME $env:ARCH $env:SNAPSHOT_HASH
+
+      - name: Build blutter executable
+        shell: pwsh
+        run: |
+          $dartver = "$env:DART_VERSION`_$env:OS_NAME`_$env:ARCH"
+          $name = "bin/blutter_dartvm${env:DART_VERSION}_${env:OS_NAME}_${env:ARCH}${{ steps.cfg.outputs.name_suffix }}.exe"
+          $extra = @()
+          if ("${{ inputs.no_analysis }}" -eq "true") { $extra += "--no-analysis" }
+          if ("${{ inputs.rebuild }}" -eq "true") { $extra += "--rebuild" }
+          # blutter.py always tries to run the exe on the input after building.
+          # Feed it a dummy file; verify exe exists instead of trusting exit code.
+          New-Item -ItemType File -Force dummy_libapp.so | Out-Null
+          python blutter.py --dart-version $dartver @extra dummy_libapp.so out
+          if (-not (Test-Path $name)) { exit 1 }
+
+      - name: Package release zip
+        id: pkg
+        shell: pwsh
+        run: |
+          $base = "blutter-dartvm${env:DART_VERSION}_${env:OS_NAME}_${env:ARCH}${{ steps.cfg.outputs.name_suffix }}_windows"
+          New-Item -ItemType Directory -Force "pkg/$base" | Out-Null
+          Copy-Item "bin/blutter_dartvm${env:DART_VERSION}_${env:OS_NAME}_${env:ARCH}${{ steps.cfg.outputs.name_suffix }}.exe" "pkg/$base/"
+          Copy-Item bin/*.dll "pkg/$base/"
+          Compress-Archive -Path "pkg/$base" -DestinationPath "$base.zip" -Force
+          "pkg_name=$base" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload blutter binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.pkg_name }}
+          path: ${{ steps.pkg.outputs.pkg_name }}.zip
+          if-no-files-found: error
+
+      - name: Upload to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dartvm${{ env.DART_VERSION }}-${{ env.OS_NAME }}-${{ env.ARCH }}${{ steps.cfg.outputs.name_suffix }}-windows
+          name: blutter dartvm${{ env.DART_VERSION }} ${{ env.OS_NAME }} ${{ env.ARCH }} (Windows)
+          files: ${{ steps.pkg.outputs.pkg_name }}.zip
